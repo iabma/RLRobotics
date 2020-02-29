@@ -8,25 +8,22 @@ using code = vision::code;
 brain Brain;
 
 // VEXcode device constructors
-motor leftMotorA = motor(PORT6, ratio18_1, false);
+motor leftMotorA = motor(PORT1, ratio18_1, false);
 motor leftMotorB = motor(PORT2, ratio18_1, false);
-motor_group LeftDriveSmart = motor_group(leftMotorA, leftMotorB);
+motor_group DrivetrainLeft = motor_group(leftMotorA, leftMotorB);
 
-motor rightMotorA = motor(PORT3, ratio18_1, true);
-motor rightMotorB = motor(PORT4, ratio18_1, true);
-motor_group RightDriveSmart = motor_group(rightMotorA, rightMotorB);
+motor rightMotorA = motor(PORT11, ratio18_1, true);
+motor rightMotorB = motor(PORT12, ratio18_1, true);
+motor_group DrivetrainRight = motor_group(rightMotorA, rightMotorB);
 
-motor intakeRight = motor(PORT7, ratio6_1, false); // UPDATE PORTS
-motor intakeLeft = motor(PORT17, ratio6_1, true);
+motor intakeRight = motor(PORT17, ratio6_1, true);
+motor intakeLeft = motor(PORT9, ratio6_1, false);
 motor_group Intake = motor_group(intakeLeft, intakeRight);
 
-digital_out PneumaticLeft = digital_out(Brain.ThreeWirePort.D);
-digital_out PneumaticRight = digital_out(Brain.ThreeWirePort.A);
+motor LadderLift = motor(PORT16, ratio36_1, false);
+motor ArmLift = motor(PORT19, ratio36_1, false);
 
-drivetrain Drivetrain =
-    drivetrain(LeftDriveSmart, RightDriveSmart, 319.19, 385, 240, mm, 1);
-motor LadderLift = motor(PORT11, ratio36_1, true);
-motor ArmLift = motor(PORT5, ratio36_1, false);
+inertial Sensor = inertial(PORT8);
 controller Controller = controller(primary);
 
 /* VARIABLES */
@@ -40,6 +37,14 @@ bool LadderLiftStopped = true;
 bool DrivetrainLNeedsToBeStopped = true;
 bool DrivetrainRNeedsToBeStopped = true;
 bool IntakeStopped = true;
+bool placing = false;
+
+bool intakeSlow = false;
+
+int ladderLockPos = ladderSittingPos;
+int armLockPos = armSittingPos;
+int intakeLockPos = 0;
+int lockedHeading = 0;
 
 /* ui variables */
 int UIClock = 0;
@@ -55,12 +60,14 @@ int* intakeData = new int[206];
 const int deadband = 5;
 const int clockms = 10;
 
-const int ladderSittingPos = 39;
-const int armSittingPos = 60;
-const int ladderExtended = 485;
+const int ladderSittingPos = 0;
+const int armSittingPos = 0;
+const int ladderExtended = 1450;
+const int ladderMax = ladderExtended + 100;
 
-int ladderLockPos = ladderSittingPos;
-int armLockPos = armSittingPos;
+const int ladderNod = 750;
+const int midTower = 1200;
+const int lowTower = 940;
 
 /* ui constants */
 const int UIUpdateFrequency = 2;
@@ -79,7 +86,7 @@ void checkDeadbands(int drivetrainLeftSideSpeed, int drivetrainRightSideSpeed) {
   if (drivetrainLeftSideSpeed < deadband &&
       drivetrainLeftSideSpeed > -deadband) {
     if (DrivetrainLNeedsToBeStopped) {
-      LeftDriveSmart.stop();
+      DrivetrainLeft.stop();
       DrivetrainLNeedsToBeStopped = false;
     }
   } else {
@@ -88,12 +95,16 @@ void checkDeadbands(int drivetrainLeftSideSpeed, int drivetrainRightSideSpeed) {
   if (drivetrainRightSideSpeed < deadband &&
       drivetrainRightSideSpeed > -deadband) {
     if (DrivetrainRNeedsToBeStopped) {
-      RightDriveSmart.stop();
+      DrivetrainRight.stop();
       DrivetrainRNeedsToBeStopped = false;
     }
   } else {
     DrivetrainRNeedsToBeStopped = true;
   }
+}
+
+int clamp(int val, int min, int max) {
+  return (val < min) ? min : (max < val) ? max : val;
 }
 
 double distanceBetweenPoints(int x_1, int y_1, int x_2, int y_2) {
@@ -224,91 +235,100 @@ int setup() {
   UISetup();
   activeUI();
 
-  Intake.setVelocity(100, velocityUnits::pct);
+  Intake.setVelocity(intakeSlow ? 50 : 100, velocityUnits::pct);
+  Intake.setStopping(hold);
+  LadderLift.setStopping(hold);
+  ArmLift.setStopping(hold);
+  LadderLift.setVelocity(100, pct);
+  ArmLift.setVelocity(100, pct);
+  ArmLift.rotateTo(armSittingPos, deg);
+  LadderLift.rotateTo(ladderSittingPos, deg);
   
   while (true) {
+    printf("%f\n", Sensor.heading());
     if (RemoteControlCodeEnabled) {
       /* DRIVETRAIN */
       int drivetrainLeftSideSpeed =
-          Controller.Axis3.position() + Controller.Axis1.position();
+          pow(Controller.Axis3.position() + Controller.Axis1.position(), 3) / 10000; // cubic sensitivity 
       int drivetrainRightSideSpeed =
-          Controller.Axis3.position() - Controller.Axis1.position();
+          pow(Controller.Axis3.position() - Controller.Axis1.position(), 3) / 10000;
 
-      /*
-      int drivetrainLeftSideSpeed =
-          cos(1.57 * Controller.Axis3.position() / 100.0) * 100 + cos(1.57 * Controller.Axis1.position() / 100.0) * 100;
-      int drivetrainRightSideSpeed =
-          cos(1.57 * Controller.Axis3.position() / 100.0) * 100 - cos(1.57 * Controller.Axis1.position() / 100.0) * 100;
-      */
-
-      drivetrainLeftSideSpeed = Controller.ButtonL1.pressing() ? drivetrainLeftSideSpeed / 5 : drivetrainLeftSideSpeed / 2;
-      drivetrainRightSideSpeed = Controller.ButtonL1.pressing() ? drivetrainRightSideSpeed / 5 : drivetrainRightSideSpeed / 2;
-
+      drivetrainLeftSideSpeed = Controller.ButtonL1.pressing() ? drivetrainLeftSideSpeed / 4 : drivetrainLeftSideSpeed;
+      drivetrainRightSideSpeed = Controller.ButtonL1.pressing() ? drivetrainRightSideSpeed / 4 : drivetrainRightSideSpeed;
+      
       checkDeadbands(drivetrainLeftSideSpeed, drivetrainRightSideSpeed);
 
       if (DrivetrainLNeedsToBeStopped) {
-        LeftDriveSmart.setVelocity(drivetrainLeftSideSpeed, percent);
-        LeftDriveSmart.spin(forward);
+        DrivetrainLeft.setVelocity(drivetrainLeftSideSpeed, percent);
+        DrivetrainLeft.spin(forward);
       }
 
       if (DrivetrainRNeedsToBeStopped) {
-        RightDriveSmart.setVelocity(drivetrainRightSideSpeed, percent);
-        RightDriveSmart.spin(forward);
+        DrivetrainRight.setVelocity(drivetrainRightSideSpeed, percent);
+        DrivetrainRight.spin(forward);
       }
 
       /* ARM CODE */
       int armPos = ArmLift.rotation(deg);
-      //Brain.Screen.printAt(5, 20, "Armpos: %d", armPos);
 
-      if (Controller.ButtonDown.pressing()) {
+      if (Controller.ButtonDown.pressing() && armPos > 0) {
         ArmLift.spin(reverse);
         ArmLiftStopped = false;
-      } else if (Controller.ButtonRight.pressing()) {
+      } else if (Controller.ButtonRight.pressing()) { // ADD UPPER LIMIT
         ArmLift.spin(forward);
         ArmLiftStopped = false;
       } else if (!ArmLiftStopped) {
         ArmLift.stop();
         ArmLiftStopped = true;
-        armLockPos = armSittingPos > armPos ? armSittingPos : armPos;
-      } else if (ArmLiftStopped && armPos != armLockPos) {
+        //armLockPos = clamp(armPos, armSittingPos / 2, midTower);
+      } /* else if (ArmLiftStopped && armPos != armLockPos) {
         ArmLift.rotateTo(armLockPos, deg, 100, velocityUnits::pct, false);
-      }
+      } */
+      
+      /* if (ladderLockPos <= ladderNod && armLockPos > armSittingPos)
+        ladderLockPos = clamp(ladderSittingPos + (armPos - armSittingPos) * 10, ladderSittingPos, ladderNod); */
 
       /* LADDER LIFTER */
       int ladderPos = LadderLift.rotation(deg);
-      //Brain.Screen.printAt(5, 45, "Ladderpos: %d", ladderPos);
-
-      if (Controller.ButtonX.pressing()) {
-        if (ladderPos <= 485) {
-          LadderLift.spin(forward);
-          LadderLiftStopped = false;
-        } else {
-          LadderLift.stop();
-          LadderLiftStopped = true;
-          ladderLockPos = ladderSittingPos > ladderPos ? ladderSittingPos : ladderPos;
-        }
-      } else if (Controller.ButtonB.pressing()) {
-        LadderLift.spin(reverse);
+      int ladderSpeed = clamp(pow(double(ladderExtended - ladderPos) / double(ladderExtended), .5) * 100 + 20, 50, 100);
+      
+      if (Controller.ButtonX.pressing() && ladderPos <= ladderMax) {
+        //printf("ladderpos: %d\n", ladderPos);
+        placing = true;
+        Intake.setStopping(coast);
+        LadderLift.spin(forward, ladderSpeed, pct);
+        LadderLiftStopped = false;
+      } else if (Controller.ButtonB.pressing() && ladderPos >= ladderSittingPos) {
+        placing = true;
+        Intake.setStopping(coast);
+        LadderLift.spin(reverse, 100, pct);
         LadderLiftStopped = false;
       } else if (!LadderLiftStopped) {
+        placing = false;
         LadderLift.stop();
         LadderLiftStopped = true;
-        ladderLockPos = ladderSittingPos > ladderPos ? ladderSittingPos : ladderPos;
-      } else if (LadderLiftStopped && ladderPos != ladderLockPos) {
+        //Intake.setStopping(hold);
+        //ladderLockPos = clamp(ladderPos, ladderSittingPos, ladderExtended);
+      } /* else if (LadderLiftStopped && ladderPos != ladderLockPos) {
         LadderLift.rotateTo(ladderLockPos, deg, 100, velocityUnits::pct, false);
-      }
+      } */
 
       /* INTAKE */
       if (Controller.ButtonR1.pressing()) {
-        Intake.spin(forward);
+        Intake.setStopping(hold);
+        Intake.spin(forward, 100, pct);
         IntakeStopped = false;
       } else if (Controller.ButtonR2.pressing()) {
-        Intake.spin(reverse);
+        Intake.setStopping(hold);
+        Intake.spin(reverse, 75, pct);
         IntakeStopped = false;
-      } else if (!IntakeStopped) {
+      } else if (!IntakeStopped && !placing) {
         Intake.stop();
+        //intakeLockPos = intakePos;
         IntakeStopped = true;
-      }
+      } /* else if (IntakeStopped && intakePos != intakeLockPos) {
+        Intake.rotateTo(intakeLockPos, deg, 100, velocityUnits::pct, false);
+      } */
 
       /* GRAPHED DATA */
 
@@ -334,21 +354,21 @@ int setup() {
 
         /* arm */
         int unclamped = ArmLift.rotation(deg) / 10 + 1;
-        armData[0] = (unclamped < 0) ? 0 : (53 < unclamped) ? 53 : unclamped;
+        armData[0] = clamp(unclamped, 0, 53);
 
         /* ladder */
         unclamped = LadderLift.rotation(deg) / 9 + 2;
-        ladderData[0] = (unclamped < 0) ? 0 : (53 < unclamped) ? 53 : unclamped;
+        ladderData[0] = clamp(unclamped, 0, 53);
 
         /* drivetrain */
         unclamped = drivetrainLeftSideSpeed / 4 + 24;
-        drivetrainLeftData[0] = (unclamped < 0) ? 0 : (49 < unclamped) ? 49 : unclamped;
+        drivetrainLeftData[0] = clamp(unclamped, 0, 49);
         unclamped = drivetrainRightSideSpeed / 4 + 25;
-        drivetrainRightData[0] = (unclamped < 0) ? 0 : (49 < unclamped) ? 49 : unclamped;
+        drivetrainRightData[0] = clamp(unclamped, 0, 49);
 
         /* intake */
         unclamped = Intake.velocity(pct) / 2 + 24;
-        intakeData[0] = (unclamped < 0) ? 0 : (49 < unclamped) ? 49 : unclamped;
+        intakeData[0] = clamp(unclamped, 0, 49);
 
         /* drawing */
         for (int i = 0; i < 206; i++) {
